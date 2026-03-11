@@ -13,7 +13,7 @@ DATABASE_PASSWORD=12345678
 # SOURCE_SCHEMA=public
 ```
 
-Установи зависимости:
+Установка зависимостей:
 
 ```powershell
 pip install pandas openpyxl psycopg2-binary python-dotenv
@@ -28,14 +28,14 @@ pip install pandas openpyxl psycopg2-binary python-dotenv
 - `sql_scripts/build_rep_fraud.sql` - логика построения витрины фрода.
 - `sql_scripts/qa_checks.sql` - QA-проверки после ETL.
 
-## 3. Первый запуск
+## 3. Первичный запуск
 ```powershell
 python init_sql_project.py
 python main.py
 python run_qa.py
 ```
 
-## 4. Повторный запуск тех же входных файлов
+## 4. Повторный запуск на тех же входных файлах
 Если файлы уже были обработаны и перемещены в `archive`:
 
 ```powershell
@@ -44,3 +44,12 @@ python reset_data_load.py
 python main.py
 python run_qa.py
 ```
+
+## 5. Подготовка к сдаче
+Собрать чистую папку только с нужными файлами:
+
+```powershell
+python prepare_submission.py
+```
+
+Итоговая папка: `submission_ready/`

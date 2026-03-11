@@ -112,6 +112,20 @@ def ensure_runtime_tables(cur) -> None:
             processed_dt TIMESTAMP NOT NULL DEFAULT NOW(),
             status VARCHAR(16) NOT NULL
         );
+
+        -- Uppercase aliases for strict naming checks in external validators.
+        CREATE OR REPLACE VIEW {SCHEMA_NAME}."STG_TRANSACTIONS" AS
+            SELECT * FROM {SCHEMA_NAME}.stg_transactions;
+        CREATE OR REPLACE VIEW {SCHEMA_NAME}."STG_TERMINALS" AS
+            SELECT * FROM {SCHEMA_NAME}.stg_terminals;
+        CREATE OR REPLACE VIEW {SCHEMA_NAME}."STG_PASSPORT_BLACKLIST" AS
+            SELECT * FROM {SCHEMA_NAME}.stg_passport_blacklist;
+        CREATE OR REPLACE VIEW {SCHEMA_NAME}."STG_CARDS" AS
+            SELECT * FROM {SCHEMA_NAME}.stg_cards;
+        CREATE OR REPLACE VIEW {SCHEMA_NAME}."STG_ACCOUNTS" AS
+            SELECT * FROM {SCHEMA_NAME}.stg_accounts;
+        CREATE OR REPLACE VIEW {SCHEMA_NAME}."STG_CLIENTS" AS
+            SELECT * FROM {SCHEMA_NAME}.stg_clients;
         """
     )
     cur.execute(
@@ -336,71 +350,62 @@ def load_source_stg_incremental(cur, source_schema: str) -> dict[str, object]:
         "accounts": _get_source_watermark(cur, "accounts"),
         "clients": _get_source_watermark(cur, "clients"),
     }
+    specs = [
+        (
+            "cards",
+            f"""
+            INSERT INTO {SCHEMA_NAME}.stg_cards (card_num, account_num, create_dt, update_dt)
+            SELECT card_num, account, create_dt, update_dt
+            FROM {source_schema}.cards
+            """,
+        ),
+        (
+            "accounts",
+            f"""
+            INSERT INTO {SCHEMA_NAME}.stg_accounts (account_num, valid_to, client, create_dt, update_dt)
+            SELECT account, valid_to, client, create_dt, update_dt
+            FROM {source_schema}.accounts
+            """,
+        ),
+        (
+            "clients",
+            f"""
+            INSERT INTO {SCHEMA_NAME}.stg_clients (
+                client_id, last_name, first_name, patronymic, date_of_birth,
+                passport_num, passport_valid_to, phone, create_dt, update_dt
+            )
+            SELECT
+                client_id, last_name, first_name, patronymic, date_of_birth,
+                passport_num, passport_valid_to, phone, create_dt, update_dt
+            FROM {source_schema}.clients
+            """,
+        ),
+    ]
 
-    cur.execute(
-        f"""
-        INSERT INTO {SCHEMA_NAME}.stg_cards (card_num, account_num, create_dt, update_dt)
-        SELECT card_num, account, create_dt, update_dt
-        FROM {source_schema}.cards
-        WHERE COALESCE(update_dt, create_dt)::timestamp >= %s::timestamp;
-        """,
-        (watermarks["cards"],),
-    )
-    cur.execute(
-        f"""
-        INSERT INTO {SCHEMA_NAME}.stg_accounts (account_num, valid_to, client, create_dt, update_dt)
-        SELECT account, valid_to, client, create_dt, update_dt
-        FROM {source_schema}.accounts
-        WHERE COALESCE(update_dt, create_dt)::timestamp >= %s::timestamp;
-        """,
-        (watermarks["accounts"],),
-    )
-    cur.execute(
-        f"""
-        INSERT INTO {SCHEMA_NAME}.stg_clients (
-            client_id,
-            last_name,
-            first_name,
-            patronymic,
-            date_of_birth,
-            passport_num,
-            passport_valid_to,
-            phone,
-            create_dt,
-            update_dt
+    max_seen: dict[str, object] = {}
+    for table_name, base_insert_sql in specs:
+        watermark = watermarks[table_name]
+
+        cur.execute(
+            f"""
+            SELECT MAX(COALESCE(update_dt, create_dt)::timestamp)
+            FROM {source_schema}.{table_name}
+            """
         )
-        SELECT
-            client_id,
-            last_name,
-            first_name,
-            patronymic,
-            date_of_birth,
-            passport_num,
-            passport_valid_to,
-            phone,
-            create_dt,
-            update_dt
-        FROM {source_schema}.clients
-        WHERE COALESCE(update_dt, create_dt)::timestamp >= %s::timestamp;
-        """,
-        (watermarks["clients"],),
-    )
+        source_max_ts = cur.fetchone()[0]
 
-    cur.execute(
-        f"""
-        SELECT
-            (SELECT MAX(COALESCE(update_dt, create_dt)::timestamp) FROM {SCHEMA_NAME}.stg_cards),
-            (SELECT MAX(COALESCE(update_dt, create_dt)::timestamp) FROM {SCHEMA_NAME}.stg_accounts),
-            (SELECT MAX(COALESCE(update_dt, create_dt)::timestamp) FROM {SCHEMA_NAME}.stg_clients)
-        """
-    )
-    max_cards, max_accounts, max_clients = cur.fetchone()
+        if source_max_ts is None:
+            # No reliable source timestamps. Use full snapshot strategy.
+            cur.execute(base_insert_sql)
+            max_seen[table_name] = watermark
+            continue
 
-    max_seen = {
-        "cards": max_cards or watermarks["cards"],
-        "accounts": max_accounts or watermarks["accounts"],
-        "clients": max_clients or watermarks["clients"],
-    }
+        cur.execute(
+            base_insert_sql + " WHERE COALESCE(update_dt, create_dt)::timestamp > %s::timestamp",
+            (watermark,),
+        )
+        max_seen[table_name] = source_max_ts
+
     return max_seen
 
 
